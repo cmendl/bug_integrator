@@ -1,0 +1,19 @@
+# ignore Python temporary and compiled files
+__pycache__
+*.pyc
+
+# inore generated Jupyter files
+*.ipynb_checkpoints/
+
+# ignore compressed files
+*.zip
+*.tar.gz
+
+# ignore PDF files
+*.pdf
+
+# ignore build folder
+build/
+
+# Mac
+.DS_Store
