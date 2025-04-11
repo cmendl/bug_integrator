@@ -174,7 +174,6 @@ def flow_update_basis(node: TreeNode, i: int, f_tree, dt: float):
 
     Algorithm 5 in "Rank-adaptive time integration of tree tensor networks".
     """
-    # logical dimensions
     assert not node.is_leaf
     q0, s0 = np.linalg.qr(matricize(node.conn, i).T)
     s0 = s0.T
@@ -203,7 +202,7 @@ def flow_update_basis(node: TreeNode, i: int, f_tree, dt: float):
         m_hat = u_hat.conj().T @ node.children[i].conn
         return TreeNode(u_hat, []), m_hat
     else:
-        childnode_hat, c0_hat = tree_time_step(node.children[i], func_subtree, dt)
+        childnode_hat, c0_hat = tree_time_step(TreeNode(node.children[i].conn @ s0, node.children[i].children), func_subtree, dt)
         q_hat, _ = np.linalg.qr(np.concatenate((
             matricize(childnode_hat.conn, childnode_hat.conn.ndim - 1).T,
             matricize(c0_hat, c0_hat.ndim - 1).T), axis=1), mode="reduced")
