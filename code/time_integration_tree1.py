@@ -1,4 +1,6 @@
 """
+Rank-adaptive integrator for a tree tensor network and generic (possibly nonlinear) right-hand side function
+
 References:
 - Gianluca Ceruti, Christian Lubich, Dominik Sulz
   Rank-adaptive time integration of tree tensor networks
@@ -519,7 +521,7 @@ def main3():
     plt.xlabel(r"$\Delta t$")
     plt.ylabel("error")
     plt.title(f"tmax = {tmax}, tol = {tol}")
-    plt.savefig("time_integration_tree_error.pdf")
+    plt.savefig("time_integration_tree1_error.pdf")
     plt.show()
 
     # visualize time-dependent ranks
@@ -529,7 +531,7 @@ def main3():
     plt.xlabel("time")
     plt.ylabel("rank")
     plt.legend()
-    plt.savefig("time_integration_tree_ranks.pdf")
+    plt.savefig("time_integration_tree1_ranks.pdf")
     plt.show()
 
 

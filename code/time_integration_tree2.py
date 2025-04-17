@@ -131,22 +131,17 @@ class TreeNode:
         return t.reshape(phys_dims + [t.shape[-1]])
 
 
-def tree_vdot(node_a: TreeNode, node_b: TreeNode):
+def tree_vdot(chi: TreeNode, psi: TreeNode):
     """
-    Compute the logical inner product of two trees with the same topology.
+    Compute the logical inner product `<chi | psi>` of two trees with the same topology.
     """
-    if node_a.is_leaf:
-        assert node_b.is_leaf
-        assert node_a.conn.ndim == 2
-        return node_a.conn.conj().T @ node_b.conn
-    t = np.kron(node_a.conn.conj(), node_b.conn)
-    # contract inner product of child nodes into 't'
-    assert len(node_a.children) == len(node_b.children)
-    for i in range(len(node_a.children)):
-        r = tree_vdot(node_a.children[i], node_b.children[i])
-        t = single_mode_product(r.reshape((1, -1)), t, i)
-        assert t.shape[i] == 1
-    return t.reshape((node_a.conn.shape[-1], node_b.conn.shape[-1]))
+    assert len(chi.children) == len(psi.children)
+    t = psi.conn
+    for i in range(len(psi.children)):
+        r = tree_vdot(chi.children[i], psi.children[i])
+        t = single_mode_product(r, t, i)
+    t = chi.conn.reshape((-1, chi.conn.shape[-1])).conj().T @ t.reshape((-1, t.shape[-1]))
+    return t
 
 
 def tree_operator_averages(chi: TreeNode, op: TreeNode, psi: TreeNode):
@@ -161,14 +156,14 @@ def tree_operator_averages(chi: TreeNode, op: TreeNode, psi: TreeNode):
         assert chi.conn.ndim == 2
         assert psi.conn.ndim == 2
         return TreeNode(np.einsum(chi.conn.conj(), (3, 0), op.conn, (3, 4, 1), psi.conn, (4, 2), (0, 1, 2)), [])
-    t = np.kron(chi.conn.conj(), np.kron(op.conn, psi.conn))
+    t = np.kron(op.conn, psi.conn)
     assert len(chi.children) == len(op.children) and len(psi.children) == len(op.children)
     children = []
     for i in range(len(op.children)):
         child = tree_operator_averages(chi.children[i], op.children[i], psi.children[i])
-        t = single_mode_product(child.conn.reshape((1, -1)), t, i)
-        assert t.shape[i] == 1
+        t = single_mode_product(child.conn.reshape((child.conn.shape[0], -1)), t, i)
         children.append(child)
+    t = chi.conn.reshape((-1, chi.conn.shape[-1])).conj().T @ t.reshape((-1, t.shape[-1]))
     return TreeNode(t.reshape((chi.conn.shape[-1], op.conn.shape[-1], psi.conn.shape[-1])), children)
 
 
