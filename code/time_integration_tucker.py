@@ -141,8 +141,6 @@ def retained_singular_values(s, tol: float):
         if np.sqrt(sq_sum) > tol:
             break
         r1 = i
-    # keep one additional singular value
-    r1 = min(r1 + 1, len(s))
     return r1
 
 
@@ -170,7 +168,7 @@ def higher_order_svd(t, tol: float, max_ranks):
     return u_list, c, s_list
 
 
-def time_step(u0_list, c0, dt: float, tol: float):
+def time_step(u0_list, c0, dt: float, rel_tol: float):
     """
     Perform a rank-adaptive Tucker integration step.
     """
@@ -182,7 +180,7 @@ def time_step(u0_list, c0, dt: float, tol: float):
         m_hat_list.append(m_hat)
     s_hat = flow_update_core(u_hat_list, multi_mode_product(m_hat_list, c0), dt)
     # truncate based on tolerance
-    p_list, c1, _ = higher_order_svd(s_hat, tol, s_hat.ndim * (-1,))
+    p_list, c1, _ = higher_order_svd(s_hat, dt * rel_tol, s_hat.ndim * (-1,))
     u1_list = [u_hat_list[i] @ p_list[i] for i in range(len(u_hat_list))]
     return u1_list, c1
 
@@ -221,14 +219,14 @@ def initial_value(n: int):
 def main():
 
     n = 25
-    tol = 1e-6
+    rel_tol = 5e-5
 
     r = 5
 
     # reference initial value
     y0 = initial_value(n)
     # Tucker format approximation
-    u0_list, c0, s0_list = higher_order_svd(y0, 0., (r, r, r))
+    u0_list, c0, _ = higher_order_svd(y0, 0., (r, r, r))
     # cast to complex types
     y0 = (1+0j) * y0
     u0_list = [(1+0j) * u0 for u0 in u0_list]
@@ -242,14 +240,14 @@ def main():
     tmax = 1
 
     # visualize initial value
-    fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+    _, ax = plt.subplots(subplot_kw={"projection": "3d"})
     ax.voxels(y0.real > 0.1, facecolors="#0000FF7F")
     plt.title("initial value")
     plt.show()
 
     # reference solution
     y_ref = flow_ref(y0, tmax)
-    fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+    _, ax = plt.subplots(subplot_kw={"projection": "3d"})
     ax.voxels(y_ref.real > 0.1, facecolors="#0000FF7F")
     ax.voxels(y_ref.imag > 0.1, facecolors="#00FF007F")
     plt.title(f"reference solution at t = {tmax}")
@@ -265,14 +263,14 @@ def main():
         u_list, c = u0_list, c0
         ranks = [max(c.shape)]
         for _ in range(nsteps):
-            u_list, c = time_step(u_list, c, tmax/nsteps, tol)
+            u_list, c = time_step(u_list, c, tmax/nsteps, rel_tol)
             ranks.append(max(c.shape))
         ranks_list.append(ranks)
         print("c.shape (after time evolution):", c.shape)
         y1 = multi_mode_product(u_list, c)
         errlist[i] = np.linalg.norm(y1 - y_ref)
         # visualize solution
-        fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+        _, ax = plt.subplots(subplot_kw={"projection": "3d"})
         ax.voxels(y1.real > 0.1, facecolors="#0000FF7F")
         ax.voxels(y1.imag > 0.1, facecolors="#00FF007F")
         plt.title(f"rank adaptive solution at t = {tmax}, time step dt = {tmax/nsteps}")
@@ -281,7 +279,7 @@ def main():
     print("errlist:", errlist)
 
     # visualize approximation error in dependence of the time step
-    plt.title(f"n = {n}, tmax = {tmax}, r = {r}, tol = {tol}")
+    plt.title(f"n = {n}, tmax = {tmax}, r = {r}, rel_tol = {rel_tol}")
     plt.loglog(tmax/nsteps_list, errlist)
     plt.xlabel(r"$\Delta t$")
     plt.ylabel("error")
@@ -291,7 +289,7 @@ def main():
     # visualize time-dependent ranks
     for i, nsteps in enumerate(nsteps_list):
         plt.plot(np.linspace(0, tmax, nsteps + 1, endpoint=True), ranks_list[i], label=f"dt = {tmax/nsteps}")
-    plt.title(f"n = {n}, tmax = {tmax}, r = {r}, tol = {tol}")
+    plt.title(f"n = {n}, tmax = {tmax}, r = {r}, rel_tol = {rel_tol}")
     plt.xlabel("time")
     plt.ylabel("rank")
     plt.legend()

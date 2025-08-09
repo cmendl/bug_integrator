@@ -252,7 +252,7 @@ def tree_time_step(node: TreeNode, f_tree, dt: float):
     return TreeNode(c1_hat, children_hat_list), c0_hat
 
 
-def truncate_tree(node: TreeNode, tol: float, max_rank: int = None, additional: bool = False):
+def truncate_tree(node: TreeNode, tol: float, max_rank: int = None):
     """
     Perform a rank truncation of a tree from root to leaves.
     """
@@ -262,7 +262,7 @@ def truncate_tree(node: TreeNode, tol: float, max_rank: int = None, additional: 
     children_trunc = []
     for i in range(len(node.children)):
         u, sigma, _ = np.linalg.svd(matricize(node.conn, i), full_matrices=False)
-        chi = retained_singular_values(sigma, tol, additional)
+        chi = retained_singular_values(sigma, tol)
         if max_rank:
             # truncate in case max_rank < chi
             chi = min(chi, max_rank)
@@ -270,7 +270,7 @@ def truncate_tree(node: TreeNode, tol: float, max_rank: int = None, additional: 
         u_list.append(u)
         cit = single_mode_product(u.T, node.children[i].conn, node.children[i].conn.ndim - 1)
         # recursion to children
-        children_trunc.append(truncate_tree(TreeNode(cit, node.children[i].children), tol, max_rank, additional))
+        children_trunc.append(truncate_tree(TreeNode(cit, node.children[i].children), tol, max_rank))
     # form the truncated core tensor
     c = node.conn
     for i in range(len(node.children)):
@@ -302,7 +302,7 @@ def construct_ising_1d_hamiltonian(nsites: int, J: float, h: float, g: float):
     return H
 
 
-def retained_singular_values(s, tol: float, additional: bool = False):
+def retained_singular_values(s, tol: float):
     """
     Number of retained singular values based on given tolerance.
     """
@@ -313,9 +313,6 @@ def retained_singular_values(s, tol: float, additional: bool = False):
         if np.sqrt(sq_sum) > tol:
             break
         r1 = i
-    if additional:
-        # keep one additional singular value
-        r1 = min(r1 + 1, len(s))
     return r1
 
 
@@ -416,7 +413,7 @@ def main1():
     err = np.linalg.norm(d - np.identity(t7.conn.shape[-1]))
     print("err:", err)
 
-    t_trunc = truncate_tree(t7, 0.1, additional=False)
+    t_trunc = truncate_tree(t7, 0.1)
     print("t_trunc.conn.shape:", t_trunc.conn.shape)
     err_trunc = np.linalg.norm(t_trunc.to_full_tensor() - t_tensor_normalized)
     print("err_trunc:", err_trunc)
@@ -473,8 +470,8 @@ def main3():
     # overall simulation time
     tmax = 1
 
-    # truncation tolerance
-    tol = 1e-5
+    # relative truncation tolerance
+    rel_tol = 5e-4
 
     # reference solution
     y_ref = flow_ref(y_init_tensor.reshape(-1), tmax)
@@ -494,10 +491,11 @@ def main3():
         print("nsteps:", nsteps)
         y = y_init
         print("initial y.conn.shape:", y.conn.shape)
+        dt = tmax/nsteps
         ranks = [max(y.conn.shape)]
         for _ in range(nsteps):
-            y, _ = tree_time_step(y, func_tree, tmax/nsteps)
-            y = truncate_tree(y, tol, additional=True)
+            y, _ = tree_time_step(y, func_tree, dt)
+            y = truncate_tree(y, dt * rel_tol)
             ranks.append(max(y.conn.shape))
         print("final y.conn.shape:", y.conn.shape)
         ranks_list.append(ranks)
@@ -508,7 +506,7 @@ def main3():
         plt.plot(y1_vec.imag, label="Im")
         plt.xlabel("i")
         plt.ylabel("y[i]")
-        plt.title(f"rank adaptive solution at t = {tmax}, time step dt = {tmax/nsteps}")
+        plt.title(f"rank adaptive solution at t = {tmax}, time step dt = {dt}")
         plt.legend()
         plt.show()
     print("tmax/nsteps_list:", tmax/nsteps_list)
@@ -520,14 +518,14 @@ def main3():
     plt.loglog(tmax/nsteps_list, err_list)
     plt.xlabel(r"$\Delta t$")
     plt.ylabel("error")
-    plt.title(f"tmax = {tmax}, tol = {tol}")
+    plt.title(f"tmax = {tmax}, rel_tol = {rel_tol}")
     plt.savefig("time_integration_tree1_error.pdf")
     plt.show()
 
     # visualize time-dependent ranks
     for i, nsteps in enumerate(nsteps_list):
         plt.plot(np.linspace(0, tmax, nsteps + 1, endpoint=True), ranks_list[i], label=f"dt = {tmax/nsteps}")
-    plt.title(f"tmax = {tmax}, tol = {tol}")
+    plt.title(f"tmax = {tmax}, rel_tol = {rel_tol}")
     plt.xlabel("time")
     plt.ylabel("rank")
     plt.legend()

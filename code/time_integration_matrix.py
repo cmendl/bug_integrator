@@ -85,12 +85,10 @@ def retained_singular_values(s, tol: float):
         if np.sqrt(sq_sum) > tol:
             break
         r1 = i
-    # # keep one additional singular value
-    # r1 = min(r1 + 1, len(s))
     return range(r1)
 
 
-def time_step(u0, s0, v0, dt: float, tol: float):
+def time_step(u0, s0, v0, dt: float, rel_tol: float):
     """
     Perform a single time evolution step.
     """
@@ -99,7 +97,7 @@ def time_step(u0, s0, v0, dt: float, tol: float):
     s_hat = flow_update_core(u_hat, m_hat @ s0 @ n_hat.conj().T, v_hat, dt)
     # truncate
     p_hat, sigma_hat, qh_hat = np.linalg.svd(s_hat)
-    idx = retained_singular_values(sigma_hat, tol)
+    idx = retained_singular_values(sigma_hat, dt * rel_tol)
     s1 = np.diag(sigma_hat[idx])
     p1 = p_hat[:, idx]
     q1 = qh_hat[idx, :].conj().T
@@ -139,7 +137,7 @@ def initial_values(n: int, rng: np.random.Generator):
 def main():
 
     n = 100
-    tol = 1e-6
+    rel_tol = 1e-5
 
     rng = np.random.default_rng(42)
     u0, s0, v0 = initial_values(n, rng)
@@ -166,7 +164,7 @@ def main():
     # err_lowrank = np.linalg.norm(y_ref_lowrank - y_ref)
     # print("err_lowrank:", err_lowrank)
     # sigma_ref_lowrank = np.linalg.svd(y_ref_lowrank, compute_uv=False)
-    # print("number of retained singular values:", len(retained_singular_values(sigma_ref_lowrank, tol)))
+    # print("number of retained singular values:", len(retained_singular_values(sigma_ref_lowrank, 1e-6)))
 
     nsteps_list = np.array([10, 20, 50, 100, 200, 500, 1000])
     errlist = np.zeros(len(nsteps_list))
@@ -177,7 +175,7 @@ def main():
         u, s, v = u0, s0, v0
         ranks = [s.shape[0]]
         for _ in range(nsteps):
-            u, s, v = time_step(u, s, v, tmax/nsteps, tol)
+            u, s, v = time_step(u, s, v, tmax/nsteps, rel_tol)
             ranks.append(s.shape[0])
         ranks_list.append(ranks)
         print("s.shape (after time evolution):", s.shape)
@@ -187,7 +185,7 @@ def main():
     print("errlist:", errlist)
 
     # visualize approximation error in dependence of the time step
-    plt.title(f"n = {n}, tmax = {tmax}, r = {r}, tol = {tol}")
+    plt.title(f"n = {n}, tmax = {tmax}, r = {r}, rel_tol = {rel_tol}")
     plt.loglog(tmax/nsteps_list, errlist)
     plt.xlabel(r"$\Delta t$")
     plt.ylabel("error")
@@ -197,7 +195,7 @@ def main():
     # visualize time-dependent ranks
     for i, nsteps in enumerate(nsteps_list):
         plt.plot(np.linspace(0, tmax, nsteps + 1, endpoint=True), ranks_list[i], label=f"dt = {tmax/nsteps}")
-    plt.title(f"n = {n}, tmax = {tmax}, r = {r}, tol = {tol}")
+    plt.title(f"n = {n}, tmax = {tmax}, r = {r}, rel_tol = {rel_tol}")
     plt.xlabel("time")
     plt.ylabel("rank")
     plt.legend()

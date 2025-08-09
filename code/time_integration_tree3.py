@@ -1,5 +1,6 @@
 """
-Rank-adaptive integrator for a tree tensor network specialized to a TTNO Hamiltonian and attaching physical legs also to inner nodes
+Rank-adaptive integrator for a tree tensor network specialized to a TTNO Hamiltonian
+and attaching physical legs also to inner nodes
 
 References:
 - Gianluca Ceruti, Christian Lubich, Dominik Sulz
@@ -47,7 +48,7 @@ def is_isometry(a, tol: float = 1e-10):
     return np.allclose(a.conj().T @ a, np.identity(a.shape[1]), rtol=tol, atol=tol)
 
 
-def retained_singular_values(s, tol: float, additional: bool = False):
+def retained_singular_values(s, tol: float):
     """
     Number of retained singular values based on given tolerance.
     """
@@ -58,9 +59,6 @@ def retained_singular_values(s, tol: float, additional: bool = False):
         if np.sqrt(sq_sum) > tol:
             break
         r1 = i
-    if additional:
-        # keep one additional singular value
-        r1 = min(r1 + 1, len(s))
     return r1
 
 
@@ -393,9 +391,9 @@ def compute_child_environment(state: TreeNode, hamiltonian: TreeNode, avg_childr
     Compute the environment tensor for the i-th child node
     after gauge-transforming the root node into an isometry towards the child.
     """
-    q0, s0 = np.linalg.qr(matricize(state.conn, i).T)
+    q0, s0 = np.linalg.qr(matricize(state.conn, i).T, mode="reduced")
     s0 = s0.T
-    q0ten = tensorize(q0.T, state.conn.shape, i)
+    q0ten = tensorize(q0.T, state.conn.shape[:i] + (q0.shape[1],) + state.conn.shape[i+1:], i)
     # project onto the orthonormalized tree without the current subtree
     env = apply_local_operator(hamiltonian.conn, q0ten)
     for j in range(len(state.children)):
@@ -407,8 +405,7 @@ def compute_child_environment(state: TreeNode, hamiltonian: TreeNode, avg_childr
     env = single_mode_product(env_root.reshape((env_root.shape[0], -1)), env, env.ndim - 1)
     # isolate the i-th virtual bond and contract all other axes
     env = q0.conj().T @ matricize(env, i).T
-    env = env.reshape((state.conn.shape[i], hamiltonian.conn.shape[i], state.conn.shape[i]))
-
+    env = env.reshape((q0.shape[1], hamiltonian.conn.shape[i], q0.shape[1]))
     return env, s0
 
 
@@ -435,7 +432,7 @@ def time_step_subtree(state: TreeNode, hamiltonian: TreeNode, avg_tree: TreeNode
     return TreeNode(c1_hat, children_hat_list), c0_hat, m_hat_children, a_hat_children
 
 
-def tree_time_step(state: TreeNode, hamiltonian: TreeNode, dt: float, tol_trunc: float):
+def tree_time_step(state: TreeNode, hamiltonian: TreeNode, dt: float, rel_tol_trunc: float):
     """
     Perform a rank-augmenting TTN integration step
     for a Schrödinger differential equation with Hamiltonian given as TTNO.
@@ -445,11 +442,11 @@ def tree_time_step(state: TreeNode, hamiltonian: TreeNode, dt: float, tol_trunc:
     assert hamiltonian.conn.shape[-1] == 1
     avg_tree = tree_operator_averages(state, hamiltonian, state)
     state, _, _, _ = time_step_subtree(state, hamiltonian, avg_tree, np.ones((1, 1, 1)), dt)
-    state = truncate_tree(state, tol_trunc, additional=True)
+    state = truncate_tree(state, dt * rel_tol_trunc)
     return state
 
 
-def truncate_tree(node: TreeNode, tol: float, max_rank: int = None, additional: bool = False):
+def truncate_tree(node: TreeNode, tol: float, max_rank: int = None):
     """
     Perform a rank truncation of a tree from root to leaves.
     """
@@ -459,7 +456,7 @@ def truncate_tree(node: TreeNode, tol: float, max_rank: int = None, additional: 
     children_trunc = []
     for i in range(len(node.children)):
         u, sigma, _ = np.linalg.svd(matricize(node.conn, i), full_matrices=False)
-        chi = retained_singular_values(sigma, tol, additional)
+        chi = retained_singular_values(sigma, tol)
         if max_rank:
             # truncate in case max_rank < chi
             chi = min(chi, max_rank)
@@ -467,7 +464,7 @@ def truncate_tree(node: TreeNode, tol: float, max_rank: int = None, additional: 
         u_list.append(u)
         cit = single_mode_product(u.T, node.children[i].conn, node.children[i].conn.ndim - 1)
         # recursion to children
-        children_trunc.append(truncate_tree(TreeNode(cit, node.children[i].children), tol, max_rank, additional))
+        children_trunc.append(truncate_tree(TreeNode(cit, node.children[i].children), tol, max_rank))
     # form the truncated core tensor
     c = node.conn
     for i in range(len(node.children)):
@@ -567,7 +564,7 @@ def main1():
     err_id = np.linalg.norm(d - np.identity(t7.conn.shape[-1]))
     print("err_id:", err_id)
 
-    t_trunc = truncate_tree(t7, 0.2, additional=False)
+    t_trunc = truncate_tree(t7, 0.2)
     print("t_trunc.conn.shape:", t_trunc.conn.shape)
     err_trunc = np.linalg.norm(t_trunc.to_full_tensor() - t_tensor_normalized)
     print("err_trunc:", err_trunc)
@@ -719,8 +716,8 @@ def main5():
     # overall simulation time
     tmax = 1
 
-    # truncation tolerance
-    tol = 1e-5
+    # relative truncation tolerance
+    rel_tol = 1e-4
 
     # reference solution
     y_ref = expm(-1j * tmax * hamiltonian_matrix) @ y_init_vec
@@ -741,10 +738,11 @@ def main5():
         print("nsteps:", nsteps)
         y = y_init
         print("initial y.conn.shape:", y.conn.shape)
+        dt = tmax/nsteps
         ranks = [max(y.conn.shape)]
         ediff = [0]
         for _ in range(nsteps):
-            y = tree_time_step(y, hamiltonian, tmax/nsteps, tol)
+            y = tree_time_step(y, hamiltonian, dt, rel_tol)
             ranks.append(max(y.conn.shape))
             avg_tree = tree_operator_averages(y, hamiltonian, y)
             ediff.append(abs(avg_tree.conn[0, 0, 0].real - en_init))
@@ -758,7 +756,7 @@ def main5():
         plt.plot(y1_vec.imag, label="Im")
         plt.xlabel("i")
         plt.ylabel("y[i]")
-        plt.title(f"rank adaptive solution at t = {tmax}, time step dt = {tmax/nsteps}")
+        plt.title(f"rank adaptive solution at t = {tmax}, time step dt = {dt}")
         plt.legend()
         plt.show()
     print("tmax/nsteps_list:", tmax/nsteps_list)
@@ -768,14 +766,14 @@ def main5():
     plt.loglog(tmax/nsteps_list, err_list)
     plt.xlabel(r"$\Delta t$")
     plt.ylabel("error")
-    plt.title(f"tmax = {tmax}, tol = {tol}")
+    plt.title(f"tmax = {tmax}, rel_tol = {rel_tol}")
     plt.savefig("time_integration_tree3_error.pdf")
     plt.show()
 
     # visualize time-dependent ranks
     for i, nsteps in enumerate(nsteps_list):
         plt.plot(np.linspace(0, tmax, nsteps + 1, endpoint=True), ranks_list[i], label=f"dt = {tmax/nsteps}")
-    plt.title(f"tmax = {tmax}, tol = {tol}")
+    plt.title(f"tmax = {tmax}, rel_tol = {rel_tol}")
     plt.xlabel("time")
     plt.ylabel("rank")
     plt.legend()
@@ -785,7 +783,7 @@ def main5():
     # visualize time-dependent energy differences
     for i, nsteps in enumerate(nsteps_list):
         plt.semilogy(np.linspace(0, tmax, nsteps + 1, endpoint=True), ediff_list[i], label=f"dt = {tmax/nsteps}")
-    plt.title(f"tmax = {tmax}, tol = {tol}")
+    plt.title(f"tmax = {tmax}, rel_tol = {rel_tol}")
     plt.xlabel("time")
     plt.ylabel("deviation from initial energy")
     plt.legend()
