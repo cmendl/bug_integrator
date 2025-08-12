@@ -50,7 +50,7 @@ def is_isometry(a, tol: float = 1e-10):
 
 def retained_singular_values(s, tol: float):
     """
-    Number of retained singular values based on given tolerance.
+    Number of retained singular values based on tolerance `tol`.
     """
     sq_sum = 0
     r1 = len(s)
@@ -92,7 +92,8 @@ class TreeNode:
       2. physical axis or axes
       3. parent axis
     """
-    def __init__(self, conn, children: Sequence):
+    def __init__(self, i_site: int, conn, children: Sequence):
+        self.i_site = i_site
         self.conn = np.asarray(conn)
         assert self.conn.ndim >= 2
         self.children = list(children)
@@ -124,23 +125,27 @@ class TreeNode:
         with leading dimensions the physical dimensions and the last dimension the rank.
         """
         if self.is_leaf:
-            return self.conn
+            return self.conn, (self.i_site,)
         t = self.conn
         phys_dims = []
+        sites = ()
         for i, c in enumerate(self.children):
-            ct = c.to_full_tensor()
-            # record physical dimensions
+            ct, cs = c.to_full_tensor()
+            # record physical dimensions and site indices
             phys_dims = phys_dims + list(ct.shape[:-1])
+            sites = sites + cs
             t = single_mode_product(ct.reshape(-1, ct.shape[-1]), t, i)
-        # local physical dimension
+        # local physical dimension and site index
         phys_dims = phys_dims + list(self.conn.shape[len(self.children):-1])
-        return t.reshape(phys_dims + [t.shape[-1]])
+        sites = sites + (self.i_site,)
+        return t.reshape(phys_dims + [t.shape[-1]]), sites
 
 
 def tree_vdot(chi: TreeNode, psi: TreeNode):
     """
     Compute the logical inner product `<chi | psi>` of two trees with the same topology.
     """
+    assert chi.i_site == psi.i_site
     assert len(chi.children) == len(psi.children)
     t = psi.conn
     for i in range(len(psi.children)):
@@ -189,13 +194,14 @@ def tree_operator_averages(chi: TreeNode, op: TreeNode, psi: TreeNode):
     Compute the operator averages `<chi | op | psi>` on all subtrees,
     representing the result in a tree of the same topology.
     """
+    assert chi.i_site == op.i_site == psi.i_site
     if op.is_leaf:
         assert chi.is_leaf
         assert psi.is_leaf
         assert  op.conn.ndim == 3
         assert chi.conn.ndim == 2
         assert psi.conn.ndim == 2
-        return TreeNode(np.einsum(chi.conn.conj(), (3, 0), op.conn, (3, 4, 1), psi.conn, (4, 2), (0, 1, 2)), [])
+        return TreeNode(op.i_site, np.einsum(chi.conn.conj(), (3, 0), op.conn, (3, 4, 1), psi.conn, (4, 2), (0, 1, 2)), [])
     # contract physical dimensions and interleave remaining dimensions
     assert len(chi.children) == len(op.children) and len(psi.children) == len(op.children)
     nc = len(chi.children)
@@ -203,7 +209,7 @@ def tree_operator_averages(chi: TreeNode, op: TreeNode, psi: TreeNode):
     for i in range(nc):
         avg_children.append(tree_operator_averages(chi.children[i], op.children[i], psi.children[i]))
     avg_conn = local_operator_averages(chi.conn, op.conn, psi.conn, [ac.conn for ac in avg_children])
-    return TreeNode(avg_conn, avg_children)
+    return TreeNode(op.i_site, avg_conn, avg_children)
 
 
 def flatten_local_dimensions(local_dims) -> tuple:
@@ -222,7 +228,7 @@ def multiply_local_dimensions(local_dims: tuple) -> int:
     return np.prod(flatten_local_dimensions(local_dims), dtype=int)
 
 
-def square_local_dimensions(local_dims: tuple) -> tuple:
+def square_local_dimensions(local_dims):
     """
     Return a new tuple of nested local dimensions with entrywise squared dimensions.
     """
@@ -231,7 +237,7 @@ def square_local_dimensions(local_dims: tuple) -> tuple:
     return tuple(square_local_dimensions(ld) for ld in local_dims)
 
 
-def tree_from_state(state, local_dims, tol: float):
+def tree_from_state(state, local_dims, tol: float, i_site_next: int = 0):
     """
     Construct a tree approximating a given state,
     with `local_dims` a recursively nested tuple of the form
@@ -241,14 +247,19 @@ def tree_from_state(state, local_dims, tol: float):
     assert state.ndim == 2
     if len(local_dims) == 1:
         assert state.shape[0] == local_dims[0]
-        return TreeNode(state, [])
+        return TreeNode(i_site_next, state, [])
     child_dims = tuple([multiply_local_dimensions(ld) for ld in local_dims[:-1]])
-    u_list, c, _ = higher_order_svd(state.reshape(child_dims + (local_dims[-1], state.shape[1])), tol)
+    u_list, conn, _ = higher_order_svd(state.reshape(child_dims + (local_dims[-1], state.shape[1])), tol)
     # re-absorb unitaries for physical axis and parent bond
-    c = single_mode_product(u_list[-1], c, c.ndim - 1)
-    c = single_mode_product(u_list[-2], c, c.ndim - 2)
+    conn = single_mode_product(u_list[-1], conn, conn.ndim - 1)
+    conn = single_mode_product(u_list[-2], conn, conn.ndim - 2)
     # recursive function call on subtrees
-    return TreeNode(c, [tree_from_state(u_list[i], local_dims[i], tol) for i in range(len(local_dims) - 1)])
+    children = []
+    for i in range(len(local_dims) - 1):
+        child = tree_from_state(u_list[i], local_dims[i], tol, i_site_next)
+        children.append(child)
+        i_site_next = child.i_site + 1
+    return TreeNode(i_site_next, conn, children)
 
 
 def interleave_local_operator_axes(op, local_dims):
@@ -284,8 +295,8 @@ def reshape_nodes_as_operators(node: TreeNode):
     d = int(np.sqrt(node.conn.shape[-2]))
     assert node.conn.shape[-2] == d**2
     if node.is_leaf:
-        return TreeNode(node.conn.reshape((d, d, node.conn.shape[-1])), [])
-    return TreeNode(node.conn.reshape(node.conn.shape[:-2] + (d, d, node.conn.shape[-1])),
+        return TreeNode(node.i_site, node.conn.reshape((d, d, node.conn.shape[-1])), [])
+    return TreeNode(node.i_site, node.conn.reshape(node.conn.shape[:-2] + (d, d, node.conn.shape[-1])),
                     [reshape_nodes_as_operators(c) for c in node.children])
 
 
@@ -302,7 +313,7 @@ def tree_from_operator(op, local_dims, tol: float):
 
 def rk4(f, y, h: float):
     """
-    Runge–Kutta method of order 4.
+    Runge-Kutta method of order 4.
     """
     k1 = h*f(y)
     k2 = h*f(y + 0.5*k1)
@@ -336,7 +347,8 @@ def flow_update_basis(state: TreeNode, hamiltonian: TreeNode, avg: TreeNode, env
 
     TTNO-adapted Algorithm 5 in "Rank-adaptive time integration of tree tensor networks".
     """
-    y = TreeNode(state.conn @ s0, state.children)
+    assert state.i_site == hamiltonian.i_site == avg.i_site
+    y = TreeNode(state.i_site, state.conn @ s0, state.children)
     if state.is_leaf:
         # right-hand side of the ordinary differential equation for the basis update
         f = lambda y: -1j * np.einsum(env_root, (1, 2, 3), hamiltonian.conn, (0, 4, 2), y, (4, 3), (0, 1))
@@ -344,7 +356,7 @@ def flow_update_basis(state: TreeNode, hamiltonian: TreeNode, avg: TreeNode, env
         u_hat, _ = np.linalg.qr(np.concatenate((k1, state.conn), axis=1), mode="reduced")
         m_hat = u_hat.conj().T @ state.conn
         avg_hat = np.einsum(u_hat.conj(), (3, 0), hamiltonian.conn, (3, 4, 1), u_hat, (4, 2), (0, 1, 2))
-        return TreeNode(u_hat, []), m_hat, TreeNode(avg_hat, [])
+        return TreeNode(state.i_site, u_hat, []), m_hat, TreeNode(avg.i_site, avg_hat, [])
     else:
         y1, c0_hat, m_hat_children, avg_hat_children = time_step_subtree(y, hamiltonian, avg, env_root, dt)
         q_hat, _ = np.linalg.qr(np.concatenate((
@@ -361,7 +373,7 @@ def flow_update_basis(state: TreeNode, hamiltonian: TreeNode, avg: TreeNode, env
         # compute new averages (expectation values)
         assert len(avg_hat_children) == len(hamiltonian.children)
         avg_hat = local_operator_averages(y1.conn, hamiltonian.conn, y1.conn, [ac.conn for ac in avg_hat_children])
-        return y1, m_hat, TreeNode(avg_hat, avg_hat_children)
+        return y1, m_hat, TreeNode(avg.i_site, avg_hat, avg_hat_children)
 
 
 def flow_update_connecting_tensor(c0_hat, avg_hat_children: Sequence[TreeNode], hamiltonian: TreeNode, env_root, dt: float):
@@ -391,6 +403,7 @@ def compute_child_environment(state: TreeNode, hamiltonian: TreeNode, avg_childr
     Compute the environment tensor for the i-th child node
     after gauge-transforming the root node into an isometry towards the child.
     """
+    assert state.i_site == hamiltonian.i_site
     q0, s0 = np.linalg.qr(matricize(state.conn, i).T, mode="reduced")
     s0 = s0.T
     q0ten = tensorize(q0.T, state.conn.shape[:i] + (q0.shape[1],) + state.conn.shape[i+1:], i)
@@ -416,6 +429,7 @@ def time_step_subtree(state: TreeNode, hamiltonian: TreeNode, avg_tree: TreeNode
 
     TTNO-adapted Algorithm 4 in "Rank-adaptive time integration of tree tensor networks".
     """
+    assert state.i_site == hamiltonian.i_site == avg_tree.i_site
     assert not state.is_leaf
     children_hat_list = []
     m_hat_children = []
@@ -429,7 +443,7 @@ def time_step_subtree(state: TreeNode, hamiltonian: TreeNode, avg_tree: TreeNode
     # augment the initial connecting tensor
     c0_hat = multi_mode_product(m_hat_children + [np.identity(state.conn.shape[-2]), np.identity(state.conn.shape[-1])], state.conn)
     c1_hat = flow_update_connecting_tensor(c0_hat, a_hat_children, hamiltonian, env_root, dt)
-    return TreeNode(c1_hat, children_hat_list), c0_hat, m_hat_children, a_hat_children
+    return TreeNode(state.i_site, c1_hat, children_hat_list), c0_hat, m_hat_children, a_hat_children
 
 
 def tree_time_step(state: TreeNode, hamiltonian: TreeNode, dt: float, rel_tol_trunc: float):
@@ -437,6 +451,7 @@ def tree_time_step(state: TreeNode, hamiltonian: TreeNode, dt: float, rel_tol_tr
     Perform a rank-augmenting TTN integration step
     for a Schrödinger differential equation with Hamiltonian given as TTNO.
     """
+    assert state.i_site == hamiltonian.i_site
     # should be the actual roots of the trees
     assert state.conn.shape[-1] == 1
     assert hamiltonian.conn.shape[-1] == 1
@@ -446,7 +461,7 @@ def tree_time_step(state: TreeNode, hamiltonian: TreeNode, dt: float, rel_tol_tr
     return state
 
 
-def truncate_tree(node: TreeNode, tol: float, max_rank: int = None):
+def truncate_tree(node: TreeNode, tol: float, max_rank = None):
     """
     Perform a rank truncation of a tree from root to leaves.
     """
@@ -464,13 +479,13 @@ def truncate_tree(node: TreeNode, tol: float, max_rank: int = None):
         u_list.append(u)
         cit = single_mode_product(u.T, node.children[i].conn, node.children[i].conn.ndim - 1)
         # recursion to children
-        children_trunc.append(truncate_tree(TreeNode(cit, node.children[i].children), tol, max_rank))
+        children_trunc.append(truncate_tree(TreeNode(node.children[i].i_site, cit, node.children[i].children), tol, max_rank))
     # form the truncated core tensor
-    c = node.conn
+    conn = node.conn
     for i in range(len(node.children)):
         # apply Ui^\dagger to the i-th dimension
-        c = single_mode_product(u_list[i].conj().T, c, i)
-    return TreeNode(c, children_trunc)
+        conn = single_mode_product(u_list[i].conj().T, conn, i)
+    return TreeNode(node.i_site, conn, children_trunc)
 
 
 def construct_ising_1d_hamiltonian(nsites: int, J: float, h: float, g: float):
@@ -514,34 +529,36 @@ def main1():
     rng = np.random.default_rng(410)
 
     # create a tree with random tensor entries
-    t0 = TreeNode(0.5 * crandn((2, 3), rng), [])
-    t1 = TreeNode(0.5 * crandn((3, 3), rng), [])
-    t2 = TreeNode(0.5 * crandn((2, 2), rng), [])
-    t3 = TreeNode(0.5 * crandn((2, 4), rng), [])
-    t4 = TreeNode(0.5 * crandn((6, 2), rng), [])
-    t5 = TreeNode(0.5 * crandn((3, 3, 2, 7), rng), [t0, t1])
-    t6 = TreeNode(0.5 * crandn((2, 4, 3, 5), rng), [t2, t3])
-    t7 = TreeNode(0.5 * crandn((7, 5, 2, 4, 5), rng), [t5, t6, t4])
+    t0 = TreeNode(0, 0.5 * crandn((2, 3), rng), [])
+    t1 = TreeNode(1, 0.5 * crandn((3, 3), rng), [])
+    t2 = TreeNode(2, 0.5 * crandn((2, 2), rng), [])
+    t3 = TreeNode(3, 0.5 * crandn((2, 4), rng), [])
+    t4 = TreeNode(4, 0.5 * crandn((6, 2), rng), [])
+    t5 = TreeNode(5, 0.5 * crandn((3, 3, 2, 7), rng), [t0, t1])
+    t6 = TreeNode(6, 0.5 * crandn((2, 4, 3, 5), rng), [t2, t3])
+    t7 = TreeNode(7, 0.5 * crandn((7, 5, 2, 4, 5), rng), [t5, t6, t4])
 
-    t_tensor = t7.to_full_tensor()
+    t_tensor, t_sites = t7.to_full_tensor()
     print("t_tensor.ndim:", t_tensor.ndim)
     print("t_tensor.shape:", t_tensor.shape)
     print("t_tensor.size:", t_tensor.size)
     print("np.linalg.norm(t_tensor):", np.linalg.norm(t_tensor))
     print("t_tensor[0, 0, 0, 0, 0, 0, 0, 0, 0]:", t_tensor[0, 0, 0, 0, 0, 0, 0, 0, 0])
+    print("t_sites:", t_sites)
 
     # create another tree with random tensor entries
-    s0 = TreeNode(0.5 * crandn((2, 2), rng), [])
-    s1 = TreeNode(0.5 * crandn((3, 3), rng), [])
-    s2 = TreeNode(0.5 * crandn((2, 2), rng), [])
-    s3 = TreeNode(0.5 * crandn((2, 4), rng), [])
-    s4 = TreeNode(0.5 * crandn((6, 3), rng), [])
-    s5 = TreeNode(0.5 * crandn((2, 3, 2, 7), rng), [s0, s1])
-    s6 = TreeNode(0.5 * crandn((2, 4, 3, 5), rng), [s2, s3])
-    s7 = TreeNode(0.5 * crandn((7, 5, 3, 4, 5), rng), [s5, s6, s4])
+    s0 = TreeNode(0, 0.5 * crandn((2, 2), rng), [])
+    s1 = TreeNode(1, 0.5 * crandn((3, 3), rng), [])
+    s2 = TreeNode(2, 0.5 * crandn((2, 2), rng), [])
+    s3 = TreeNode(3, 0.5 * crandn((2, 4), rng), [])
+    s4 = TreeNode(4, 0.5 * crandn((6, 3), rng), [])
+    s5 = TreeNode(5, 0.5 * crandn((2, 3, 2, 7), rng), [s0, s1])
+    s6 = TreeNode(6, 0.5 * crandn((2, 4, 3, 5), rng), [s2, s3])
+    s7 = TreeNode(7, 0.5 * crandn((7, 5, 3, 4, 5), rng), [s5, s6, s4])
 
-    s_tensor = s7.to_full_tensor()
+    s_tensor, s_sites = s7.to_full_tensor()
     print("s_tensor.ndim:", s_tensor.ndim)
+    print("s_sites:", s_sites)
 
     overlap = tree_vdot(t7, s7)
     print("overlap.shape:", overlap.shape)
@@ -553,7 +570,7 @@ def main1():
     print("r.shape:", r.shape)
     print("t7.conn.shape:", t7.conn.shape)
 
-    t_tensor_normalized = t7.to_full_tensor()
+    t_tensor_normalized, _ = t7.to_full_tensor()
     print("np.linalg.norm(t_tensor_normalized):", np.linalg.norm(t_tensor_normalized))
     print(f"np.linalg.norm(t_tensor_normalized) - sqrt({t7.conn.shape[-1]}):", np.linalg.norm(t_tensor_normalized) - np.sqrt(t7.conn.shape[-1]))
     err_norm = np.linalg.norm(t_tensor - single_mode_product(r.T, t_tensor_normalized, t_tensor_normalized.ndim - 1))
@@ -566,7 +583,7 @@ def main1():
 
     t_trunc = truncate_tree(t7, 0.2)
     print("t_trunc.conn.shape:", t_trunc.conn.shape)
-    err_trunc = np.linalg.norm(t_trunc.to_full_tensor() - t_tensor_normalized)
+    err_trunc = np.linalg.norm(t_trunc.to_full_tensor()[0] - t_tensor_normalized)
     print("err_trunc:", err_trunc)
 
 
@@ -585,8 +602,9 @@ def main2():
     t = tree_from_state(state, local_dims, 1e-8)
     print("t.conn.shape:", t.conn.shape)
 
-    t_tensor = t.to_full_tensor()
+    t_tensor, t_sites = t.to_full_tensor()
     print("t_tensor.shape:", t_tensor.shape)
+    print("t_sites:", t_sites)
     err = np.linalg.norm(state.reshape(t_tensor.shape) - t_tensor)
     print("err:", err)
 
@@ -614,8 +632,9 @@ def main3():
     print("t.conn.shape:", t.conn.shape)
     print("t.children[1].conn.shape:", t.children[1].conn.shape)
 
-    t_tensor = t.to_full_tensor()
+    t_tensor, t_sites = t.to_full_tensor()
     print("t_tensor.shape:", t_tensor.shape)
+    print("t_sites:", t_sites)
     err = np.linalg.norm(state.reshape(t_tensor.shape) - t_tensor)
     print("err:", err)
 
@@ -641,8 +660,9 @@ def main4():
     print("err_interleave:", err_interleave)
 
     op_tree = tree_from_operator(op, local_dims, tol=1e-8)
-    op_tensor = op_tree.to_full_tensor()
+    op_tensor, op_sites = op_tree.to_full_tensor()
     print("op_tensor.shape:", op_tensor.shape)
+    print("op_sites:", op_sites)
     print("op_tree.conn.shape:", op_tree.conn.shape)
     err_op = np.linalg.norm(op_interleaved - op_tensor.reshape(op_interleaved.shape))
     print("err_op:", err_op)
@@ -650,7 +670,7 @@ def main4():
     psi = 0.25 * crandn(d_full, rng)
     print("np.linalg.norm(psi):", np.linalg.norm(psi))
     psi_tree = tree_from_state(psi.reshape((-1, 1)), local_dims, tol=1e-8)
-    err_state = np.linalg.norm(psi_tree.to_full_tensor().reshape(-1) - psi)
+    err_state = np.linalg.norm(psi_tree.to_full_tensor()[0].reshape(-1) - psi)
     print("err_state:", err_state)
 
     chi = 0.25 * crandn(d_full, rng)
@@ -673,6 +693,21 @@ def main5():
 
     d = 2
     nsites = 8
+    # tree topology (with branching node at site 7):
+    #
+    #          8
+    #         ╱ ╲
+    #        ╱   ╲
+    #       ╱     ╲
+    #      ╱       ╲
+    #     3         7
+    #    ╱ ╲       ╱│╲
+    #   ╱   ╲     ╱ │ ╲
+    #  0     2   4  5  6
+    #        │
+    #        │
+    #        1
+    #
     local_dims = (((d,), ((d,), d), d), ((d,), (d,), (d,), 1), d)
     d_full = multiply_local_dimensions(local_dims)
     print("d_full:", d_full)
@@ -681,8 +716,11 @@ def main5():
     y_init_vec_constr[0] = 1
     y_init = tree_from_state(y_init_vec_constr.reshape((-1, 1)), local_dims, 1e-8)
     print("y_init.conn.shape:", y_init.conn.shape)
-    y_init_tensor = y_init.to_full_tensor()
+    print("y_init.i_site:", y_init.i_site)
+    print("y_init.children[0].i_site:", y_init.children[0].i_site)
+    y_init_tensor, y_init_sites = y_init.to_full_tensor()
     print("y_init_tensor.shape:", y_init_tensor.shape)
+    print("y_init_sites:", y_init_sites)
     y_init_vec = y_init_tensor.reshape(-1)
     print("np.linalg.norm(y_init_vec):", np.linalg.norm(y_init_vec))
     err_init = np.linalg.norm(y_init_vec - y_init_vec_constr)
@@ -702,7 +740,7 @@ def main5():
     hamiltonian = tree_from_operator(hamiltonian_matrix, local_dims, tol=1e-8)
     print("hamiltonian.conn.shape:", hamiltonian.conn.shape)
     # restore from tree and compare with original matrix
-    hamiltonian_tensor = hamiltonian.to_full_tensor().reshape((2*nsites) * (d,))
+    hamiltonian_tensor = hamiltonian.to_full_tensor()[0].reshape((2*nsites) * (d,))
     err_h = np.linalg.norm(hamiltonian_matrix - separate_local_operator_axes(hamiltonian_tensor))
     print("err_h:", err_h)
 
@@ -749,9 +787,9 @@ def main5():
         print("final y.conn.shape:", y.conn.shape)
         ranks_list.append(ranks)
         ediff_list.append(ediff)
-        err_list[i] = np.linalg.norm(y.to_full_tensor().reshape(-1) - y_ref)
+        err_list[i] = np.linalg.norm(y.to_full_tensor()[0].reshape(-1) - y_ref)
         # visualize solution
-        y1_vec =  y.to_full_tensor().reshape(-1)
+        y1_vec =  y.to_full_tensor()[0].reshape(-1)
         plt.plot(y1_vec.real, label="Re")
         plt.plot(y1_vec.imag, label="Im")
         plt.xlabel("i")
